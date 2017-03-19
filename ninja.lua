@@ -132,6 +132,10 @@ function ninja.generateProjectCfg(cfg)
 	-- premake-ninja relies on scoped rules
 	-- and they were added in ninja v1.6
 	p.w("ninja_required_version = 1.6")
+	
+	-- set build directory
+	local obj_dir = project.getrelative(cfg.workspace, cfg.objdir)
+	p.w("builddir = " .. p.esc(obj_dir))
 	p.w("")
 
 	---------------------------------------------------- figure out toolset executables
@@ -201,8 +205,6 @@ function ninja.generateProjectCfg(cfg)
 	if cc == link then
 		all_ldflags = buildopt .. all_ldflags
 	end
-
-	local obj_dir = project.getrelative(cfg.workspace, cfg.objdir)
 
 	---------------------------------------------------- write rules
 	p.w("# core rules for " .. cfg.name)
