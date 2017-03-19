@@ -197,20 +197,23 @@ function ninja.generateProjectCfg(cfg)
 
 	local all_cflags = buildopt .. cflags .. warnings .. defines .. includes .. forceincludes
 	local all_cxxflags = buildopt .. cflags .. cppflags .. cxxflags .. warnings .. defines .. includes .. forceincludes
-	local all_ldflags = buildopt .. ldflags
+	local all_ldflags = ldflags
+	if cc == link then
+		all_ldflags = buildopt .. all_ldflags
+	end
 
 	local obj_dir = project.getrelative(cfg.workspace, cfg.objdir)
 
 	---------------------------------------------------- write rules
 	p.w("# core rules for " .. cfg.name)
-	if toolset_name == "msc" then -- TODO /NOLOGO is invalid, we need to use /nologo
+	if toolset_name == "msc" then
 		p.w("rule cc")
-		p.w("  command = " .. cc .. all_cflags .. " /nologo /showIncludes -c $in /Fo$out")
+		p.w("  command = " .. cc .. all_cflags .. " /nologo -c $in /Fo$out")
 		p.w("  description = cc $out")
 		p.w("  deps = msvc")
 		p.w("")
 		p.w("rule cxx")
-		p.w("  command = " .. cxx .. all_cxxflags .. " /nologo /showIncludes -c $in /Fo$out")
+		p.w("  command = " .. cxx .. all_cxxflags .. " /nologo -c $in /Fo$out")
 		p.w("  description = cxx $out")
 		p.w("  deps = msvc")
 		p.w("")
