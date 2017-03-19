@@ -287,15 +287,15 @@ function ninja.generateProjectCfg(cfg)
 		local filecfg = fileconfig.getconfig(node, cfg)
 		if fileconfig.hasCustomBuildRule(filecfg) then
 			-- TODO
-		elseif path.iscppfile(node.abspath) then
+		elseif path.iscppfile(filecfg.abspath) then
 			objfilename = obj_dir .. "/" .. node.objname .. intermediateExt(cfg, "cxx")
 			objfiles[#objfiles + 1] = objfilename
-			if ninja.endsWith(node.abspath, ".c") then
-				p.w("build " .. p.esc(objfilename) .. ": cc " .. p.esc(node.abspath))
+			if ninja.endsWith(filecfg.abspath, ".c") then
+				p.w("build " .. p.esc(objfilename) .. ": cc " .. p.esc(node.vpath)) --vpath is the relative path
 			else
-				p.w("build " .. p.esc(objfilename) .. ": cxx " .. p.esc(node.abspath))
+				p.w("build " .. p.esc(objfilename) .. ": cxx " .. p.esc(node.vpath))
 			end
-		elseif path.isresourcefile(node.abspath) then
+		elseif path.isresourcefile(filecfg.abspath) then
 			-- TODO
 		end
 	end,
