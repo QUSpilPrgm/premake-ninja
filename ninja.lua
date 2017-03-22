@@ -104,6 +104,19 @@ function ninja.list(value)
 	end
 end
 
+function ninja.remove_identical_words(first, second)
+	local relevant_index = 1
+	repeat
+		local first_index = string.find(first, " ", relevant_index + 1) or (string.len(first) + 1)
+		local second_index = string.find(second, " ", relevant_index + 1) or (string.len(second) + 1)
+		if (not (string.sub(first, 0, first_index - 1) == string.sub(second, 0, second_index - 1))) then
+			break
+		end
+		relevant_index = first_index
+	until (relevant_index >= string.len(first)) or (relevant_index >= string.len(second))
+	return string.sub(first, relevant_index) .. second;
+end
+
 -- generate project + config build file
 function ninja.generateProjectCfg(cfg)
 	local toolset_name = _OPTIONS.cc or cfg.toolset
@@ -200,7 +213,7 @@ function ninja.generateProjectCfg(cfg)
 	--end
 
 	local all_cflags = buildopt .. cflags .. warnings .. defines .. includes .. forceincludes
-	local all_cxxflags = buildopt .. cflags .. cppflags .. cxxflags .. warnings .. defines .. includes .. forceincludes
+	local all_cxxflags = buildopt .. ninja.remove_identical_words(cflags, cxxflags) .. cppflags .. warnings .. defines .. includes .. forceincludes
 	local all_ldflags = ldflags
 	if cc == link then
 		all_ldflags = buildopt .. all_ldflags
