@@ -12,6 +12,7 @@ local project = p.project
 local solution = p.solution
 local config = p.config
 local fileconfig = p.fileconfig
+local sha1 = require('sha1')
 
 premake.modules.ninja = {}
 local ninja = p.modules.ninja
@@ -117,6 +118,56 @@ function ninja.remove_identical_words(first, second)
 	return string.sub(first, relevant_index) .. second;
 end
 
+function ninja.dbg_get_struct_string(to_print, depth, max_depth)
+	if type(to_print) == "table" then
+		local result = string.rep("\r", depth) .. "{\n"
+		for k,v in pairs(to_print) do
+			if depth >= max_depth then
+				return "{ ... }"
+			end
+			result = result .. string.rep("\r", depth + 1) .. tostring(k) .. " = " .. ninja.dbg_get_struct_string(v, depth + 1, max_depth) .. ", \n"
+		end
+		result = result .. string.rep("\r", depth) .. " }"
+		local result_compressed = string.gsub(string.gsub(result, "\r", ""), "\n", "")
+		if (string.len(result_compressed) <= 80) then
+			return result_compressed
+		else
+			return string.gsub(result, "\r", "  ")
+		end
+	else
+		return tostring(to_print)
+	end
+end
+
+function ninja.tableIsEmpty(table_obj)
+	for k,v in pairs(table_obj) do
+		return false
+	end
+	return true
+end
+function ninja.mergeCfgs(base, add)
+    local new_cfg = p.context.extent(base); -- copy the configuration
+ 
+    -- merge all values present in 'add'
+    for index, field in pairs(p.field._list) do -- Iterating only over the relevant entries in 'add' does not
+        -- always work. It seems like generated tables do not properly work with for each loops.
+        local add_value = add[field.name]
+        if not ((add_value == nil) or ((type(add_value) == "table") and ninja.tableIsEmpty(add_value))) then -- ignore empty entries...
+            local new_field = p.field.merge(field, base[field.name], add_value)
+            new_cfg[field.name] = new_field
+        end
+    end
+  
+	-- debug...
+	--print(ninja.dbg_get_struct_string(p.fields, 0, 2))
+	--print(tostring(add["vectorextensions"]))
+	--print(ninja.dbg_get_struct_string(base, 0, 2))  --> string
+	--print(ninja.dbg_get_struct_string(add, 0, 2))  --> string
+	--io.read()
+  
+	return new_cfg
+end
+
 -- generate project + config build file
 function ninja.generateProjectCfg(cfg)
 	local toolset_name = _OPTIONS.cc or cfg.toolset
@@ -163,126 +214,133 @@ function ninja.generateProjectCfg(cfg)
 		cxx = "cl"
 		ar = "lib"
 		link = "cl"
-	elseif toolset_name == "clang" then
-		cc = toolset:gettoolname("cc")
-		cxx = toolset:gettoolname("cxx")
-		ar = toolset:gettoolname("ar")
-		link = toolset:gettoolname(iif(cfg.language == "C", "cc", "cxx"))
-	elseif toolset_name == "gcc" then
-		if not cfg.gccprefix then cfg.gccprefix = "" end
+	else
+		if (toolset_name == "gcc") and (not cfg.gccprefix) then cfg.gccprefix = "" end
 		cc = toolset.gettoolname(cfg, "cc")
 		cxx = toolset.gettoolname(cfg, "cxx")
 		ar = toolset.gettoolname(cfg, "ar")
 		link = toolset.gettoolname(cfg, iif(cfg.language == "C", "cc", "cxx"))
-	else
-		p.error("unknown toolchain " .. toolset_name)
 	end
 
 	---------------------------------------------------- figure out settings
-	globalincludes = {}
+	local globalincludes = {}
 	table.foreachi(cfg.includedirs, function(v)
 		-- TODO this is a bit obscure and currently I have no idea why exactly it's working
 		globalincludes[#globalincludes + 1] = project.getrelative(cfg.workspace, v)
 	end)
-
-	local buildopt =		ninja.list(cfg.buildoptions)
-	local cflags =			ninja.list(toolset.getcflags(cfg))
-	local cppflags =		ninja.list(toolset.getcppflags(cfg))
-	local cxxflags =		ninja.list(toolset.getcxxflags(cfg))
-	local warnings =		""
-	local defines =			ninja.list(table.join(toolset.getdefines(cfg.defines), toolset.getundefines(cfg.undefines)))
-	local includes =		ninja.list(toolset.getincludedirs(cfg, globalincludes, cfg.sysincludedirs))
-	local forceincludes =	ninja.list(toolset.getforceincludes(cfg)) -- TODO pch
-	local ldflags =			ninja.list(table.join(toolset.getLibraryDirectories(cfg), toolset.getldflags(cfg), cfg.linkoptions))
-	local libs =			""
-
-	if toolset_name == "msc" then
-		warnings = ninja.list(toolset.getwarnings(cfg))
-
-		-- for some reason Visual Studio add this libraries as "defaults" and premake doesn't tell us this
-		default_msvc_libs = " kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib "
+	
+	local buildopt = function(cfg) return ninja.list(cfg.buildoptions) end
+	local cflags = function(cfg) return ninja.list(toolset.getcflags(cfg)) end
+	local cppflags = function(cfg) return ninja.list(toolset.getcppflags(cfg)) end
+	local cxxflags = function(cfg) return ninja.list(toolset.getcxxflags(cfg)) end
+	local warnings = function(cfg) if toolset_name == "msc" then return ninja.list(toolset.getwarnings(cfg)) else return "" end end
+	local defines = function(cfg) return ninja.list(table.join(toolset.getdefines(cfg.defines), toolset.getundefines(cfg.undefines))) end
+	local includes = function(cfg) return ninja.list(toolset.getincludedirs(cfg, globalincludes, cfg.sysincludedirs)) end
+	local forceincludes = function(cfg) return ninja.list(toolset.getforceincludes(cfg)) end -- TODO pch
+	local ldflags = function(cfg) return ninja.list(table.join(toolset.getLibraryDirectories(cfg), toolset.getldflags(cfg), cfg.linkoptions)) end
+	local all_cflags = function(cfg)
+			return buildopt(cfg) .. cflags(cfg) .. warnings(cfg) .. defines(cfg) .. includes(cfg) .. forceincludes(cfg)
+		end
+	local all_cxxflags = function(cfg)
+			return buildopt(cfg) .. ninja.remove_identical_words(cflags(cfg), cxxflags(cfg)) .. cppflags(cfg) .. warnings(cfg) .. defines(cfg) .. includes(cfg) .. forceincludes(cfg)
+		end
+	local all_cflags_default = cc .. all_cflags(cfg)
+	local all_cxxflags_default = cxx .. all_cxxflags(cfg)
+	local compile_getcommand = function(this_cfg, is_c)
+	  local is_default = (this_cfg == cfg) or (not fileconfig.hasFileSettings(this_cfg))
+	  if is_c then
+		if is_default then
+		  return all_cflags_default
+		end
+		return cc .. all_cflags(ninja.mergeCfgs(cfg, this_cfg))
+	  else
+		if is_default then
+		  return all_cxxflags_default
+		end
+		return cxx .. all_cxxflags(ninja.mergeCfgs(cfg, this_cfg))
+	  end
 	end
 
+	---------------------------------------------------- write compile rules
+	p.w("# core rules for " .. cfg.name)
+	local rules = {}
+	local rule_compile_add = function(this_cfg, is_c)
+		local rule_command = compile_getcommand(this_cfg, is_c)
+		if not (rules[rule_command] == nil) then
+			return nil
+		end
+	  
+		-- figure out a suitable name for this rule...
+		local rule_name
+		if is_c then
+		rule_name = "cc"
+		else
+			rule_name = "cxx"
+		end
+		if not (this_cfg == cfg) then
+			rule_name = rule_name .. "_" .. sha1(rule_command)
+		end
+		rules[rule_command] = rule_name
+	  
+		-- this rule is not available yet. Let's add it...
+		p.w("rule " .. rule_name)
+		if toolset_name == "msc" then
+			p.w("  command = " .. rule_command .. " /nologo -c $in /Fo$out")
+			p.w("  description = " .. rule_name .. " $out")
+			p.w("  deps = msvc")
+		else
+			p.w("  command = " .. rule_command .. " -MMD -MF $out.d -c -o $out $in")
+			p.w("  description = " .. rule_name .. " $out")
+			p.w("  depfile = $out.d")
+			p.w("  deps = gcc") -- Clang does actually also uses this setting
+		end
+		p.w("")
+		return
+	end
+	local rules_compile_get_name = function(this_cfg, is_c)
+		local rule_command = compile_getcommand(this_cfg, is_c)
+		local rule_name = rules[rule_command]
+		assert(rule_name)
+		return rule_name
+	end
+
+	rule_compile_add(cfg, true)
+	rule_compile_add(cfg, false)
+	tree.traverse(project.getsourcetree(prj), {
+	onleaf = function(node, depth)
+		local filecfg = fileconfig.getconfig(node, cfg)
+		if path.iscppfile(filecfg.abspath) then
+			rule_compile_add(filecfg, ninja.endsWith(filecfg.abspath, ".c"))
+		end
+	end,
+	}, false, 1)
+
+	---------------------------------------------------- write linking rule
+	local all_ldflags
+	if cc == link then 
+	all_ldflags = buildopt(cfg) .. ldflags(cfg)
+	else
+	all_ldflags = ldflags(cfg)
+	end
+      
 	-- we don't pass getlinks(cfg) through dependencies
 	-- because system libraries are often not in PATH so ninja can't find them
-	libs = ninja.list(p.esc(config.getlinks(cfg, "siblings", "fullpath")))
 
 	-- experimental feature, change install_name of shared libs
 	--if (toolset_name == "clang") and (cfg.kind == p.SHAREDLIB) and ninja.endsWith(cfg.buildtarget.name, ".dylib") then
 	--	ldflags = ldflags .. " -install_name " .. cfg.buildtarget.name
 	--end
-
-	local all_cflags = buildopt .. cflags .. warnings .. defines .. includes .. forceincludes
-	local all_cxxflags = buildopt .. ninja.remove_identical_words(cflags, cxxflags) .. cppflags .. warnings .. defines .. includes .. forceincludes
-	local all_ldflags = ldflags
-	if cc == link then
-		all_ldflags = buildopt .. all_ldflags
-	end
-
-	---------------------------------------------------- write rules
-	p.w("# core rules for " .. cfg.name)
+  
+	p.w("rule link")
 	if toolset_name == "msc" then
-		p.w("rule cc")
-		p.w("  command = " .. cc .. all_cflags .. " /nologo -c $in /Fo$out")
-		p.w("  description = cc $out")
-		p.w("  deps = msvc")
-		p.w("")
-		p.w("rule cxx")
-		p.w("  command = " .. cxx .. all_cxxflags .. " /nologo -c $in /Fo$out")
-		p.w("  description = cxx $out")
-		p.w("  deps = msvc")
-		p.w("")
-		p.w("rule ar")
-		p.w("  command = " .. ar .. " $in /nologo -OUT:$out")
-		p.w("  description = ar $out")
-		p.w("")
-		p.w("rule link")
-		p.w("  command = " .. link .. " $in " .. ninja.list(ninja.shesc(toolset.getlinks(cfg))) .. default_msvc_libs .. " /link " .. all_ldflags .. " /nologo /out:$out")
+		p.w("  command = " .. link .. " $in " .. ninja.list(ninja.shesc(toolset.getlinks(cfg))) .. " kernel32.lib user32.lib gdi32.lib winspool.lib " ..
+			"comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /link " .. all_ldflags .. " /nologo /out:$out")
 		p.w("  description = link $out")
-		p.w("")
-	elseif toolset_name == "clang" then
-		p.w("rule cc")
-		p.w("  command = " .. cc .. all_cflags .. " -MMD -MF $out.d -c -o $out $in")
-		p.w("  description = cc $out")
-		p.w("  depfile = $out.d")
-		p.w("  deps = gcc")
-		p.w("")
-		p.w("rule cxx")
-		p.w("  command = " .. cxx .. all_cxxflags .. " -MMD -MF $out.d -c -o $out $in")
-		p.w("  description = cxx $out")
-		p.w("  depfile = $out.d")
-		p.w("  deps = gcc")
-		p.w("")
-		p.w("rule ar")
-		p.w("  command = " .. ar .. " rcs $out $in")
-		p.w("  description = ar $out")
-		p.w("")
-		p.w("rule link")
+	else
 		p.w("  command = " .. link .. " -o $out $in " .. ninja.list(ninja.shesc(toolset.getlinks(cfg, "system"))) .. " " .. all_ldflags)
 		p.w("  description = link $out")
-		p.w("")
-	elseif toolset_name == "gcc" then
-		p.w("rule cc")
-		p.w("  command = " .. cc .. all_cflags .. " -MMD -MF $out.d -c -o $out $in")
-		p.w("  description = cc $out")
-		p.w("  depfile = $out.d")
-		p.w("  deps = gcc")
-		p.w("")
-		p.w("rule cxx")
-		p.w("  command = " .. cxx .. all_cxxflags .. " -MMD -MF $out.d -c -o $out $in")
-		p.w("  description = cxx $out")
-		p.w("  depfile = $out.d")
-		p.w("  deps = gcc")
-		p.w("")
-		p.w("rule ar")
-		p.w("  command = " .. ar .. " rcs $out $in")
-		p.w("  description = ar $out")
-		p.w("")
-		p.w("rule link")
-		p.w("  command = " .. link .. " -o $out $in " .. ninja.list(ninja.shesc(toolset.getlinks(cfg, "system"))) .. " " .. all_ldflags)
-		p.w("  description = link $out")
-		p.w("")
 	end
+	p.w("")
 
 	---------------------------------------------------- build all files
 	p.w("# build files")
@@ -305,11 +363,8 @@ function ninja.generateProjectCfg(cfg)
 		elseif path.iscppfile(filecfg.abspath) then
 			objfilename = obj_dir .. "/" .. node.objname .. intermediateExt(cfg, "cxx")
 			objfiles[#objfiles + 1] = objfilename
-			if ninja.endsWith(filecfg.abspath, ".c") then
-				p.w("build " .. p.esc(objfilename) .. ": cc " .. p.esc(node.vpath)) --vpath is the relative path
-			else
-				p.w("build " .. p.esc(objfilename) .. ": cxx " .. p.esc(node.vpath))
-			end
+			local rule_compile_name = rules_compile_get_name(filecfg, ninja.endsWith(filecfg.abspath, ".c"))
+			p.w("build " .. p.esc(objfilename) .. ": " .. rule_compile_name .. " " .. p.esc(node.vpath)) -- vpath is the relative path
 		elseif path.isresourcefile(filecfg.abspath) then
 			-- TODO
 		end
@@ -318,14 +373,15 @@ function ninja.generateProjectCfg(cfg)
 	p.w("")
 
 	---------------------------------------------------- build final target
+	local output_path = ninja.list(p.esc(config.getlinks(cfg, "siblings", "fullpath")))
 	if cfg.kind == p.STATICLIB then
 		p.w("# link static lib")
-		p.w("build " .. p.esc(ninja.outputFilename(cfg)) .. ": ar " .. table.concat(p.esc(objfiles), " ") .. " " .. libs)
+		p.w("build " .. p.esc(ninja.outputFilename(cfg)) .. ": ar " .. table.concat(p.esc(objfiles), " ") .. " " .. output_path)
 
 	elseif cfg.kind == p.SHAREDLIB then
 		local output = ninja.outputFilename(cfg)
 		p.w("# link shared lib")
-		p.w("build " .. p.esc(output) .. ": link " .. table.concat(p.esc(objfiles), " ") .. " " .. libs)
+		p.w("build " .. p.esc(output) .. ": link " .. table.concat(p.esc(objfiles), " ") .. " " .. output_path)
 
 		-- TODO I'm a bit confused here, previous build statement builds .dll/.so file
 		-- but there are like no obvious way to tell ninja that .lib/.a is also build there
@@ -344,7 +400,7 @@ function ninja.generateProjectCfg(cfg)
 
 	elseif (cfg.kind == p.CONSOLEAPP) or (cfg.kind == p.WINDOWEDAPP) then
 		p.w("# link executable")
-		p.w("build " .. p.esc(ninja.outputFilename(cfg)) .. ": link " .. table.concat(p.esc(objfiles), " ") .. " " .. libs)
+		p.w("build " .. p.esc(ninja.outputFilename(cfg)) .. ": link " .. table.concat(p.esc(objfiles), " ") .. " " .. output_path)
 
 	else
 		p.error("ninja action doesn't support this kind of target " .. cfg.kind)
